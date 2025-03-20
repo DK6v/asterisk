@@ -1,0 +1,102 @@
+name: asterisk
+services:
+  init:
+    container_name: asterisk.0.init
+    image: asterisk:${ASTERISK_VERSION}
+    environment:
+      - AMPDBHOST=asterisk.mysql
+    entrypoint: /bin/sh -c
+    command: |
+      """
+      # Initialize persistent storage for configuration files
+      if [ ! -d '/local-persist/asterisk' ]; then
+        mkdir -p /local-persist
+        cp -r /etc/asterisk /local-persist/.
+      fi
+      if [ ! -d '/local-persist/freepbx' ]; then
+        mkdir -p /local-persist/freepbx
+        cp -rpL /etc/freepbx.conf /local-persist/freepbx/freepbx.conf
+        # Set MySQL database location
+      fi
+
+      # Set Asterisk Manager Portal (AMP) database hostname
+      sed -i \"s/^\\(.*AMPDBHOST[^ =]*\\)\\(.*\\)/\\1 = '$${AMPDBHOST}';/\" \\
+        /local-persist/freepbx/freepbx.conf
+
+      # Change group ownership and permissions
+      chown -R :${DOCKER_GID} /local-persist
+      chmod -R ug=rwX,o=rX /local-persist
+      """
+    volumes:
+     - ./local-persist:/local-persist
+
+  asterisk:
+    container_name: asterisk.server
+    image: asterisk:${ASTERISK_VERSION}
+    build:
+      context: ./docker
+      dockerfile: Dockerfile
+      args:
+        - ASTERISK_VERSION=${ASTERISK_VERSION}
+        - FREEPBX_VERSION=${FREEPBX_VERSION}
+    command: "supervisord --nodaemon -c /etc/supervisor/supervisord.asterisk.conf"
+    volumes:
+      - asterisk-runtime:/var/run/asterisk
+      - ./local-persist/asterisk:/etc/asterisk
+    ports:
+      - 5060:5060/udp
+      - 5160:5160/udp
+      - 18000-18100:18000-18100/udp
+      - 4445:4445
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
+  mysql:
+    container_name: asterisk.mysql
+    image: asterisk:${ASTERISK_VERSION}
+    command: "supervisord --nodaemon -c /etc/supervisor/supervisord.mysql.conf"
+    volumes:
+      - mysql-config:/etc/mysql
+      - mysql-data:/var/lib/mysql
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
+  freepbx:
+    container_name: freepbx
+    image: asterisk:${ASTERISK_VERSION}
+    command: "supervisord --nodaemon -c /etc/supervisor/supervisord.freepbx.conf"
+    privileged: true
+    pid: container:asterisk.server
+    volumes:
+      - asterisk-runtime:/var/run/asterisk
+      - ./local-persist/asterisk:/etc/asterisk
+      - ./local-persist/freepbx/freepbx.conf:/etc/freepbx.conf
+    ports:
+      - 80:80
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      asterisk:
+        condition: service_started
+
+  phpmyadmin:
+    container_name: phpmyadmin
+    image: phpmyadmin
+    ports:
+      - 8080:80
+    environment:
+      - PMA_ARBITRARY=1
+    restart: always
+    scale: 0 # don't start
+
+volumes:
+  mysql-config:
+  mysql-data:
+  asterisk-runtime:
+
+networks:
+  default:
+    external: true
+    name: asterisk-internal
